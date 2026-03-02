@@ -117,32 +117,183 @@
         let stream;
         let intervalId;
         let isProcessing = false;
+        let isRequestInFlight = false;
+        let workingStrategyId = null;
+
+        function extractResponseText(data) {
+            if (!data || typeof data !== 'object') return null;
+
+            const messageContent = data?.choices?.[0]?.message?.content;
+            if (typeof messageContent === 'string' && messageContent.trim()) return messageContent;
+
+            if (Array.isArray(messageContent)) {
+                const textParts = messageContent
+                    .map((part) => part?.text)
+                    .filter((text) => typeof text === 'string' && text.trim());
+                if (textParts.length > 0) return textParts.join('\n');
+            }
+
+            const choiceText = data?.choices?.[0]?.text;
+            if (typeof choiceText === 'string' && choiceText.trim()) return choiceText;
+
+            if (typeof data?.content === 'string' && data.content.trim()) return data.content;
+            if (typeof data?.response === 'string' && data.response.trim()) return data.response;
+
+            return null;
+        }
+
+        function normalizeBaseUrl() {
+            return baseURL.value.replace(/\/+$/, '');
+        }
+
+        async function fetchServerProps(base) {
+            try {
+                const res = await fetch(`${base}/props`);
+                if (!res.ok) return null;
+                return await res.json();
+            } catch (_) {
+                return null;
+            }
+        }
 
         // Returns response text (string)
         async function sendChatCompletionRequest(instruction, imageBase64URL) {
-            const response = await fetch(`${baseURL.value}/v1/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
+            const base = normalizeBaseUrl();
+            const rawImageBase64 = (imageBase64URL.split(',')[1] || imageBase64URL).trim();
+
+            const strategies = [
+                {
+                    id: 'chat-openai',
+                    path: '/v1/chat/completions',
+                    body: {
+                        max_tokens: 100,
+                        messages: [
+                            {
+                                role: 'user',
+                                content: [
+                                    { type: 'text', text: instruction },
+                                    { type: 'image_url', image_url: { url: imageBase64URL } }
+                                ]
+                            }
+                        ]
+                    }
                 },
-                body: JSON.stringify({
-                    max_tokens: 100,
-                    messages: [
-                        { role: 'user', content: [
-                            { type: 'text', text: instruction },
-                            { type: 'image_url', image_url: {
-                                url: imageBase64URL,
-                            } }
-                        ] },
-                    ]
-                })
-            });
-            if (!response.ok) {
-                const errorData = await response.text();
-                return `Server error: ${response.status} - ${errorData}`;
+                {
+                    id: 'chat-media-marker',
+                    path: '/v1/chat/completions',
+                    body: {
+                        max_tokens: 100,
+                        messages: [
+                            {
+                                role: 'user',
+                                content: [
+                                    { type: 'text', text: `<__media__>\n${instruction}` },
+                                    { type: 'image_url', image_url: { url: imageBase64URL } }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    id: 'chat-image-marker',
+                    path: '/v1/chat/completions',
+                    body: {
+                        max_tokens: 100,
+                        messages: [
+                            {
+                                role: 'user',
+                                content: [
+                                    { type: 'text', text: `<image>\n${instruction}` },
+                                    { type: 'image_url', image_url: { url: imageBase64URL } }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    id: 'completion-media-marker',
+                    path: '/completion',
+                    body: {
+                        prompt: {
+                            prompt_string: `<__media__>\n${instruction}`,
+                            multimodal_data: [rawImageBase64]
+                        },
+                        n_predict: 100
+                    }
+                },
+                {
+                    id: 'completion-image-marker',
+                    path: '/completion',
+                    body: {
+                        prompt: {
+                            prompt_string: `<image>\n${instruction}`,
+                            multimodal_data: [rawImageBase64]
+                        },
+                        n_predict: 100
+                    }
+                }
+            ];
+            const attemptStrategy = async (strategy) => {
+                try {
+                    const response = await fetch(`${base}${strategy.path}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(strategy.body)
+                    });
+
+                    const raw = await response.text();
+                    let parsed;
+                    try {
+                        parsed = JSON.parse(raw);
+                    } catch (_) {
+                        parsed = null;
+                    }
+
+                    if (!response.ok) {
+                        const errMsg = parsed?.error?.message || raw || `HTTP ${response.status}`;
+                        return { ok: false, error: `[${strategy.id}] ${response.status}: ${errMsg}` };
+                    }
+
+                    const text = extractResponseText(parsed);
+                    if (text) return { ok: true, text };
+                    if (raw && raw.trim()) return { ok: true, text: raw };
+
+                    return { ok: false, error: `[${strategy.id}] Success response without readable text` };
+                } catch (error) {
+                    return { ok: false, error: `[${strategy.id}] ${error.message}` };
+                }
+            };
+
+            // Keep behavior close to original: once a strategy works, use only that one.
+            if (workingStrategyId) {
+                const strategy = strategies.find((s) => s.id === workingStrategyId);
+                if (strategy) {
+                    const result = await attemptStrategy(strategy);
+                    if (result.ok) return result.text;
+                    return `Server error (${workingStrategyId}): ${result.error}`;
+                }
             }
-            const data = await response.json();
-            return data.choices[0].message.content;
+
+            // One-time discovery for compatibility with different llama.cpp/template versions.
+            const attemptErrors = [];
+            for (const strategy of strategies) {
+                const result = await attemptStrategy(strategy);
+                if (result.ok) {
+                    workingStrategyId = strategy.id;
+                    return result.text;
+                }
+                attemptErrors.push(result.error);
+            }
+
+            const serverProps = await fetchServerProps(base);
+            const templateRaw = serverProps?.chat_template;
+            const template = typeof templateRaw === 'string'
+                ? `${templateRaw.replace(/\s+/g, ' ').slice(0, 80)}${templateRaw.length > 80 ? '...' : ''}`
+                : 'unknown';
+            const details = attemptErrors.length > 0 ? attemptErrors.join('\n') : 'Unknown error';
+            return `Server error during compatibility check.\nServer chat_template: ${template}\n${details}\nTip: run llama-server with a recent llama.cpp build and --chat-template smolvlm`;
         }
 
         // 1. Ask for camera permission on load
@@ -172,6 +323,9 @@
 
         async function sendData() {
             if (!isProcessing) return; // Ensure we don't have overlapping requests if processing takes longer than interval
+            if (isRequestInFlight) return;
+
+            isRequestInFlight = true;
 
             const instruction = instructionText.value;
             const imageBase64URL = captureImage();
@@ -180,6 +334,7 @@
                 responseText.value = "Failed to capture image. Stream might not be active.";
                 // Optionally stop processing if image capture fails consistently
                 // handleStop();
+                isRequestInFlight = false;
                 return;
             }
 
@@ -194,6 +349,8 @@
             } catch (error) {
                 console.error('Error sending data:', error);
                 responseText.value = `Error: ${error.message}`;
+            } finally {
+                isRequestInFlight = false;
             }
         }
 
