@@ -13,13 +13,13 @@ services:
     restart: unless-stopped
 
   llama-server:
-    image: ghcr.io/ggml-org/llama.cpp:server
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    gpus: all
     command:
       - -hf
       - ggml-org/SmolVLM-500M-Instruct-GGUF
-      - --jinja
-      - --chat-template
-      - smolvlm
+      - --n-gpu-layers
+      - all
       - --host
       - 0.0.0.0
       - --port
