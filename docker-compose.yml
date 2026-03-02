@@ -1,0 +1,48 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      llama-server:
+        condition: service_started
+      translator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command:
+      - -hf
+      - ggml-org/SmolVLM-500M-Instruct-GGUF
+      - --jinja
+      - --chat-template
+      - smolvlm
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    volumes:
+      - llama-cache:/root/.cache
+    restart: unless-stopped
+
+  translator:
+    build:
+      context: ./translator-service
+      dockerfile: Dockerfile
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=5)
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  llama-cache:

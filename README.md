@@ -4,15 +4,37 @@
 
 This repository is a simple demo for how to use llama.cpp server with SmolVLM 500M to get real-time object detection
 
-## How to setup
+## Run everything with Docker Compose
 
-1. Install [llama.cpp](https://github.com/ggml-org/llama.cpp)
-2. Run `llama-server -hf ggml-org/SmolVLM-500M-Instruct-GGUF --jinja --chat-template smolvlm`  
-   Note: you may need to add `-ngl 99` to enable GPU (if you are using NVidia/AMD/Intel GPU)  
-   Note (2): You can also try other models [here](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md)
-3. Open `index.html`
-4. Optionally change the instruction (for example, make it returns JSON)
-5. Click on "Start" and enjoy
+1. Install Docker Desktop (or Docker Engine + Compose plugin).
+2. Run:
+
+```bash
+docker compose up --build
+```
+
+3. Open `http://localhost:8080`.
+4. Click `Start`.
+
+The compose file starts:
+- `web` (this frontend + reverse proxy)
+- `llama-server` (SmolVLM via `llama.cpp`)
+- `translator` (lightweight EN->PT translation API)
+
+Note: translator uses online translation provider, so internet access is required for translation.
+
+## Optional translation to Portuguese
+
+- In the UI, enable `Translate response to PT-BR` to translate model output in real time.
+- When disabled, output is shown in the original English.
+
+## Manual run (without Compose)
+
+If you prefer local binaries, run:
+
+```bash
+llama-server -hf ggml-org/SmolVLM-500M-Instruct-GGUF --jinja --chat-template smolvlm
+```
 
 ## Troubleshooting
 
@@ -23,3 +45,10 @@ Your server/chat template is not inserting the multimodal marker in the prompt. 
 
 - You are using a recent `llama.cpp` build.
 - You started `llama-server` with `--jinja --chat-template smolvlm`.
+
+If translation is not ready yet:
+
+```bash
+docker compose ps
+docker compose logs -f translator
+```

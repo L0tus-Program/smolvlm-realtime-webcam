@@ -79,7 +79,7 @@
     <div class="io-areas">
         <div>
             <label for="baseURL">Base API:</label><br>
-            <input id="baseURL" name="Instruction" value="http://localhost:8080"></textarea>
+            <input id="baseURL" name="Instruction" value="http://localhost:8080">
         </div>
         <div>
             <label for="instructionText">Instruction:</label><br>
@@ -100,6 +100,10 @@
             <option value="1000">1s</option>
             <option value="2000">2s</option>
         </select>
+        <label for="translateToggle">
+            <input type="checkbox" id="translateToggle" name="Translate to Portuguese">
+            Translate response to PT-BR
+        </label>
         <button id="startButton" class="start">Start</button>
     </div>
 
@@ -110,15 +114,20 @@
         const instructionText = document.getElementById('instructionText');
         const responseText = document.getElementById('responseText');
         const intervalSelect = document.getElementById('intervalSelect');
+        const translateToggle = document.getElementById('translateToggle');
         const startButton = document.getElementById('startButton');
 
         instructionText.value = "What do you see?"; // default instruction
+        baseURL.value = (window.location.origin && window.location.origin !== 'null')
+            ? window.location.origin
+            : "http://localhost:8080";
 
         let stream;
         let intervalId;
         let isProcessing = false;
         let isRequestInFlight = false;
         let workingStrategyId = null;
+        const translationCache = new Map();
 
         function extractResponseText(data) {
             if (!data || typeof data !== 'object') return null;
@@ -154,6 +163,42 @@
             } catch (_) {
                 return null;
             }
+        }
+
+        async function translateEnglishToPortuguese(text) {
+            const base = normalizeBaseUrl();
+            const normalized = text.trim();
+            if (!normalized) return text;
+
+            if (translationCache.has(normalized)) {
+                return translationCache.get(normalized);
+            }
+
+            const response = await fetch(`${base}/translate`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    q: normalized,
+                    source: 'en',
+                    target: 'pt',
+                    format: 'text'
+                })
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`Translator error ${response.status}: ${errText}`);
+            }
+
+            const data = await response.json();
+            const translated = typeof data?.translatedText === 'string' && data.translatedText.trim()
+                ? data.translatedText
+                : text;
+
+            translationCache.set(normalized, translated);
+            return translated;
         }
 
         // Returns response text (string)
@@ -344,8 +389,24 @@
             };
 
             try {
-                const response = await sendChatCompletionRequest(payload.instruction, payload.imageBase64URL);
-                responseText.value = response;
+                const modelResponse = await sendChatCompletionRequest(payload.instruction, payload.imageBase64URL);
+
+                const shouldTranslate =
+                    translateToggle.checked &&
+                    typeof modelResponse === 'string' &&
+                    !modelResponse.startsWith('Server error') &&
+                    !modelResponse.startsWith('Error:');
+
+                if (shouldTranslate) {
+                    try {
+                        responseText.value = await translateEnglishToPortuguese(modelResponse);
+                    } catch (translateError) {
+                        console.warn('Translation failed, showing original response:', translateError);
+                        responseText.value = `${modelResponse}\n\n[Translation unavailable: ${translateError.message}]`;
+                    }
+                } else {
+                    responseText.value = modelResponse;
+                }
             } catch (error) {
                 console.error('Error sending data:', error);
                 responseText.value = `Error: ${error.message}`;
