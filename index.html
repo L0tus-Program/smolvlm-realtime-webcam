@@ -42,6 +42,22 @@
             background-color: #000;
             border-radius: 8px;
         }
+        #uploadPreview {
+            width: 240px;
+            max-height: 240px;
+            object-fit: contain;
+            border: 2px solid #333;
+            border-radius: 8px;
+            background-color: #fff;
+            padding: 4px;
+        }
+        #pdfPreviewCanvas {
+            width: 480px;
+            max-width: 100%;
+            border: 2px solid #333;
+            border-radius: 8px;
+            background-color: #fff;
+        }
         #startButton {
             padding: 10px 20px;
             font-size: 16px;
@@ -91,6 +107,21 @@
 
     <video id="videoFeed" autoplay playsinline></video>
     <canvas id="canvas" class="hidden"></canvas> <!-- For capturing frames -->
+    <div class="controls">
+        <label for="uploadImageInput">Upload image:</label>
+        <input id="uploadImageInput" type="file" accept="image/*,.pdf,application/pdf">
+        <button id="analyzeUploadButton" type="button">Analyze upload</button>
+        <span id="uploadInfo" class="status-text">No image selected</span>
+    </div>
+    <img id="uploadPreview" class="hidden" alt="Uploaded image preview">
+    <div id="pdfPreviewWrapper" class="controls hidden">
+        <button id="prevPdfPageButton" type="button">Prev page</button>
+        <span id="pdfPageInfo" class="status-text">Page 0 / 0</span>
+        <button id="nextPdfPageButton" type="button">Next page</button>
+        <button id="rotatePdfLeftButton" type="button">Rotate -90°</button>
+        <button id="rotatePdfRightButton" type="button">Rotate +90°</button>
+    </div>
+    <canvas id="pdfPreviewCanvas" class="hidden"></canvas>
 
     <div class="io-areas">
         <div>
@@ -132,6 +163,7 @@
         <button id="startButton" class="start">Start</button>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <script>
         const video = document.getElementById('videoFeed');
         const canvas = document.getElementById('canvas');
@@ -144,6 +176,17 @@
         const translateInputToggle = document.getElementById('translateInputToggle');
         const translateToggle = document.getElementById('translateToggle');
         const translatorStatus = document.getElementById('translatorStatus');
+        const uploadImageInput = document.getElementById('uploadImageInput');
+        const analyzeUploadButton = document.getElementById('analyzeUploadButton');
+        const uploadInfo = document.getElementById('uploadInfo');
+        const uploadPreview = document.getElementById('uploadPreview');
+        const pdfPreviewWrapper = document.getElementById('pdfPreviewWrapper');
+        const pdfPreviewCanvas = document.getElementById('pdfPreviewCanvas');
+        const prevPdfPageButton = document.getElementById('prevPdfPageButton');
+        const nextPdfPageButton = document.getElementById('nextPdfPageButton');
+        const rotatePdfLeftButton = document.getElementById('rotatePdfLeftButton');
+        const rotatePdfRightButton = document.getElementById('rotatePdfRightButton');
+        const pdfPageInfo = document.getElementById('pdfPageInfo');
         const startButton = document.getElementById('startButton');
 
         instructionText.value = "What do you see?"; // default instruction
@@ -157,6 +200,11 @@
         let isRequestInFlight = false;
         let workingStrategyId = null;
         let translatorStatusIntervalId = null;
+        let uploadedImageBase64URL = null;
+        let uploadedFileKind = null;
+        let uploadedPdfDoc = null;
+        let uploadedPdfPage = 1;
+        let uploadedPdfRotation = 0;
         const translationCache = new Map();
 
         function parseIntInRange(value, fallback, minValue, maxValue) {
@@ -195,6 +243,80 @@
             translatorStatus.textContent = isOnline
                 ? 'Translator: online'
                 : `Translator: offline${detail ? ` (${detail})` : ''}`;
+        }
+
+        function setUploadInfo(message, isError = false) {
+            uploadInfo.classList.remove('status-online', 'status-offline');
+            uploadInfo.classList.add(isError ? 'status-offline' : 'status-online');
+            uploadInfo.textContent = message;
+        }
+
+        function readFileAsDataURL(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function setPdfPreviewVisible(visible) {
+            if (visible) {
+                pdfPreviewWrapper.classList.remove('hidden');
+                pdfPreviewCanvas.classList.remove('hidden');
+            } else {
+                pdfPreviewWrapper.classList.add('hidden');
+                pdfPreviewCanvas.classList.add('hidden');
+            }
+        }
+
+        function updatePdfNavButtons() {
+            const hasPdf = Boolean(uploadedPdfDoc);
+            const pages = hasPdf ? uploadedPdfDoc.numPages : 0;
+            pdfPageInfo.textContent = hasPdf
+                ? `Page ${uploadedPdfPage} / ${pages} | Rot ${uploadedPdfRotation}°`
+                : 'Page 0 / 0';
+            prevPdfPageButton.disabled = !hasPdf || uploadedPdfPage <= 1 || isProcessing;
+            nextPdfPageButton.disabled = !hasPdf || uploadedPdfPage >= pages || isProcessing;
+            rotatePdfLeftButton.disabled = !hasPdf || isProcessing;
+            rotatePdfRightButton.disabled = !hasPdf || isProcessing;
+        }
+
+        function normalizePdfRotation(rotation) {
+            const normalized = ((rotation % 360) + 360) % 360;
+            return normalized;
+        }
+
+        function isPdfFile(file) {
+            if (!file) return false;
+            return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+        }
+
+        function canUsePdfJs() {
+            return typeof window.pdfjsLib !== 'undefined';
+        }
+
+        function configurePdfJsWorker() {
+            if (!canUsePdfJs()) return false;
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            return true;
+        }
+
+        async function renderPdfPage(pageNumber) {
+            if (!uploadedPdfDoc) return;
+
+            const safePage = Math.min(Math.max(1, pageNumber), uploadedPdfDoc.numPages);
+            const page = await uploadedPdfDoc.getPage(safePage);
+            const viewport = page.getViewport({ scale: 1.2, rotation: uploadedPdfRotation });
+            const context = pdfPreviewCanvas.getContext('2d');
+
+            pdfPreviewCanvas.width = Math.floor(viewport.width);
+            pdfPreviewCanvas.height = Math.floor(viewport.height);
+            await page.render({ canvasContext: context, viewport }).promise;
+
+            uploadedPdfPage = safePage;
+            uploadedImageBase64URL = pdfPreviewCanvas.toDataURL('image/jpeg', 0.9);
+            updatePdfNavButtons();
         }
 
         function extractResponseText(data) {
@@ -455,14 +577,16 @@
             return canvas.toDataURL('image/jpeg', 0.8); // Use JPEG for smaller size, 0.8 quality
         }
 
-        async function sendData() {
-            if (!isProcessing) return; // Ensure we don't have overlapping requests if processing takes longer than interval
+        async function analyzeImageWithCurrentSettings(imageBase64URL) {
+            if (!imageBase64URL) {
+                responseText.value = "No image available for analysis.";
+                return;
+            }
             if (isRequestInFlight) return;
 
             isRequestInFlight = true;
 
             const instruction = instructionText.value;
-            const imageBase64URL = captureImage();
             const modelSettings = getModelSettings();
             maxInputTokens.value = String(modelSettings.inputTokenLimit);
             maxOutputTokens.value = String(modelSettings.outputTokenLimit);
@@ -481,14 +605,6 @@
             }
 
             const limitedInstruction = truncateByApproxTokens(instructionForModel, modelSettings.inputTokenLimit);
-
-            if (!imageBase64URL) {
-                responseText.value = "Failed to capture image. Stream might not be active.";
-                // Optionally stop processing if image capture fails consistently
-                // handleStop();
-                isRequestInFlight = false;
-                return;
-            }
 
             const payload = {
                 instruction: limitedInstruction.text,
@@ -538,6 +654,16 @@
             }
         }
 
+        async function sendData() {
+            if (!isProcessing) return; // Ensure we don't have overlapping requests if processing takes longer than interval
+            const imageBase64URL = captureImage();
+            if (!imageBase64URL) {
+                responseText.value = "Failed to capture image. Stream might not be active.";
+                return;
+            }
+            await analyzeImageWithCurrentSettings(imageBase64URL);
+        }
+
         function handleStart() {
             if (!stream) {
                 responseText.value = "Camera not available. Cannot start.";
@@ -554,6 +680,12 @@
             maxInputTokens.disabled = true;
             maxOutputTokens.disabled = true;
             translateInputToggle.disabled = true;
+            uploadImageInput.disabled = true;
+            analyzeUploadButton.disabled = true;
+            prevPdfPageButton.disabled = true;
+            nextPdfPageButton.disabled = true;
+            rotatePdfLeftButton.disabled = true;
+            rotatePdfRightButton.disabled = true;
 
             responseText.value = "Processing started...";
 
@@ -581,6 +713,9 @@
             maxInputTokens.disabled = false;
             maxOutputTokens.disabled = false;
             translateInputToggle.disabled = false;
+            uploadImageInput.disabled = false;
+            analyzeUploadButton.disabled = false;
+            updatePdfNavButtons();
             if (responseText.value.startsWith("Processing started...")) {
                 responseText.value = "Processing stopped.";
             }
@@ -594,14 +729,116 @@
             }
         });
 
+        uploadImageInput.addEventListener('change', async (event) => {
+            const file = event.target.files && event.target.files[0];
+            if (!file) {
+                uploadedImageBase64URL = null;
+                uploadedFileKind = null;
+                uploadedPdfDoc = null;
+                uploadedPdfPage = 1;
+                uploadedPdfRotation = 0;
+                uploadPreview.classList.add('hidden');
+                uploadPreview.removeAttribute('src');
+                setPdfPreviewVisible(false);
+                updatePdfNavButtons();
+                setUploadInfo('No image selected');
+                return;
+            }
+
+            try {
+                if (isPdfFile(file)) {
+                    if (!configurePdfJsWorker()) {
+                        throw new Error('PDF preview requires internet access to load pdf.js');
+                    }
+
+                    uploadedPdfDoc = await window.pdfjsLib.getDocument({
+                        data: new Uint8Array(await file.arrayBuffer())
+                    }).promise;
+                    uploadedPdfPage = 1;
+                    uploadedPdfRotation = 0;
+                    uploadedFileKind = 'pdf';
+                    uploadPreview.classList.add('hidden');
+                    uploadPreview.removeAttribute('src');
+                    setPdfPreviewVisible(true);
+                    await renderPdfPage(1);
+                    setUploadInfo(`Selected PDF: ${file.name} (${uploadedPdfDoc.numPages} pages)`);
+                    return;
+                }
+
+                if (!file.type.startsWith('image/')) {
+                    throw new Error('Please select an image or PDF file');
+                }
+
+                const dataURL = await readFileAsDataURL(file);
+                uploadedImageBase64URL = dataURL;
+                uploadedFileKind = 'image';
+                uploadedPdfDoc = null;
+                uploadedPdfPage = 1;
+                uploadedPdfRotation = 0;
+                setPdfPreviewVisible(false);
+                updatePdfNavButtons();
+                uploadPreview.src = dataURL;
+                uploadPreview.classList.remove('hidden');
+                setUploadInfo(`Selected image: ${file.name}`);
+            } catch (error) {
+                uploadedImageBase64URL = null;
+                uploadedFileKind = null;
+                uploadedPdfDoc = null;
+                uploadedPdfPage = 1;
+                uploadedPdfRotation = 0;
+                uploadPreview.classList.add('hidden');
+                uploadPreview.removeAttribute('src');
+                setPdfPreviewVisible(false);
+                updatePdfNavButtons();
+                setUploadInfo(`Upload error: ${error.message}`, true);
+            }
+        });
+
+        analyzeUploadButton.addEventListener('click', async () => {
+            if (isProcessing) {
+                responseText.value = 'Stop webcam processing before analyzing uploaded file.';
+                return;
+            }
+            if (!uploadedImageBase64URL) {
+                responseText.value = 'Select an image or PDF first.';
+                return;
+            }
+            await analyzeImageWithCurrentSettings(uploadedImageBase64URL);
+        });
+
+        prevPdfPageButton.addEventListener('click', async () => {
+            if (!uploadedPdfDoc || isRequestInFlight || uploadedPdfPage <= 1 || isProcessing) return;
+            await renderPdfPage(uploadedPdfPage - 1);
+        });
+
+        nextPdfPageButton.addEventListener('click', async () => {
+            if (!uploadedPdfDoc || isRequestInFlight || uploadedPdfPage >= uploadedPdfDoc.numPages || isProcessing) return;
+            await renderPdfPage(uploadedPdfPage + 1);
+        });
+
+        rotatePdfLeftButton.addEventListener('click', async () => {
+            if (!uploadedPdfDoc || isRequestInFlight || isProcessing) return;
+            uploadedPdfRotation = normalizePdfRotation(uploadedPdfRotation - 90);
+            await renderPdfPage(uploadedPdfPage);
+        });
+
+        rotatePdfRightButton.addEventListener('click', async () => {
+            if (!uploadedPdfDoc || isRequestInFlight || isProcessing) return;
+            uploadedPdfRotation = normalizePdfRotation(uploadedPdfRotation + 90);
+            await renderPdfPage(uploadedPdfPage);
+        });
+
         baseURL.addEventListener('change', () => {
             refreshTranslatorStatus();
         });
 
         // Initialize camera when the page loads
         window.addEventListener('DOMContentLoaded', () => {
+            configurePdfJsWorker();
             initCamera();
             refreshTranslatorStatus();
+            setPdfPreviewVisible(false);
+            updatePdfNavButtons();
             translatorStatusIntervalId = setInterval(refreshTranslatorStatus, 10000);
         });
 

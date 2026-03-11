@@ -45,6 +45,13 @@ Note: translator uses online translation provider, so internet access is require
 - `Max input tokens (approx)`: truncates instruction text before sending.
 - `Max output tokens`: controls `max_tokens`/`n_predict` in model requests.
 
+## Upload image analysis
+
+- Use `Upload image` + `Analyze upload` for one-shot analysis.
+- Accepts images and PDF files.
+- For PDF, the current page is rendered in-browser with preview, page navigation, and rotation controls, then analyzed.
+- Upload analysis uses the same instruction, token limits, and translation options as webcam mode.
+
 ## Manual run (without Compose)
 
 If you prefer local binaries, run:
